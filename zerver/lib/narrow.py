@@ -82,6 +82,10 @@ from zerver.models.users import (
     get_user_including_cross_realm,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 stop_words_list: Optional[List[str]] = None
 
 
@@ -743,6 +747,9 @@ class NarrowBuilder:
     def _by_search_tsearch(
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
+        logger.info('Started')
+        logger.info(operand)
+
         tsquery = func.plainto_tsquery(literal("zulip.english_us_search"), literal(operand))
         query = query.add_columns(
             ts_locs_array(

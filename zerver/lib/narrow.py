@@ -744,16 +744,16 @@ class NarrowBuilder:
         condition = column("search_pgroonga", Text).op("&@~")(operand_escaped)
         return query.where(maybe_negate(condition))
 
-    def _by_search_tsearch(
+    def _fts_search(
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
-        logger.info('Started')
-        logger.info(operand)
-
         tsquery = func.plainto_tsquery(literal("zulip.english_us_search"), literal(operand))
+
         query = query.add_columns(
             ts_locs_array(
-                literal("zulip.english_us_search", Text), column("rendered_content", Text), tsquery
+                literal("zulip.english_us_search", Text),
+                column("rendered_content", Text),
+                tsquery,
             ).label("content_matches"),
             # We HTML-escape the topic in PostgreSQL to avoid doing a server round-trip
             ts_locs_array(
@@ -763,25 +763,41 @@ class NarrowBuilder:
             ).label("topic_matches"),
         )
 
-        # Do quoted string matching.  We really want phrase
-        # search here so we can ignore punctuation and do
-        # stemming, but there isn't a standard phrase search
-        # mechanism in PostgreSQL
+        # Handle quoted phrases with LIKE search
         for term in re.findall(r'"[^"]+"|\S+', operand):
             if term[0] == '"' and term[-1] == '"':
                 term = term[1:-1]
                 term = "%" + connection.ops.prep_for_like_query(term) + "%"
                 cond: ClauseElement = or_(
-                    column("content", Text).ilike(term), topic_column_sa().ilike(term)
+                    column("content", Text).ilike(term),
+                    topic_column_sa().ilike(term),
                 )
                 query = query.where(maybe_negate(cond))
 
         cond = column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery)
-        # cond = or_(
-        #     column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery),
-        #     column("rendered_content", Text).ilike(f"%{operand}%")
-        # )
         return query.where(maybe_negate(cond))
+    
+    def _like_search(
+        self, query: Select, operand: str, maybe_negate: ConditionTransform
+    ) -> Select:
+        # This function is ready if you later want special ;keyword; handling.
+        # For now, just mimic what the old commented-out LIKE path was doing.
+        cond: ClauseElement = or_(
+            column("content", Text).ilike(f"%{operand}%"),
+            topic_column_sa().ilike(f"%{operand}%"),
+        )
+        return query.where(maybe_negate(cond))
+
+
+    def _by_search_tsearch(
+        self, query: Select, operand: str, maybe_negate: ConditionTransform
+    ) -> Select:
+        # For now, always use FTS path (old behavior).
+        # Later, you can add dispatching here:
+        if operand.startswith(";") or operand.endswith(";") or ";" in operand:
+            return self._like_search(query, operand, maybe_negate)
+        else:
+            return self._fts_search(query, operand, maybe_negate)
 
 
 def narrow_parameter(var_name: str, json: str) -> OptionalNarrowListT:

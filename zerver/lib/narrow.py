@@ -777,16 +777,7 @@ class NarrowBuilder:
         cond = column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery)
         return query.where(maybe_negate(cond))
     
-    def _like_search(
-        self, query: Select, operand: str, maybe_negate: ConditionTransform
-    ) -> Select:
-        """
-        LIKE-mode. Semicolons act as wildcards:
-        ;foo   -> %foo
-        foo;   -> foo%
-        ;foo;  -> %foo%
-        lo;kkk -> lo%kkk   (inside words also works)
-        """
+    def _like_search(self, query: Select, operand: str, maybe_negate: ConditionTransform) -> Select:
         empty_array = literal_column("ARRAY[]::integer[]")
         query = query.add_columns(
             empty_array.label("content_matches"),
@@ -802,12 +793,11 @@ class NarrowBuilder:
                     continue
                 pattern = "%" + connection.ops.prep_for_like_query(core) + "%"
             else:
-                # Replace every semicolon with SQL wildcard %
+                # Replace semicolons with %
                 core = token.replace(";", "%")
                 if not core:
                     continue
-                core_escaped = connection.ops.prep_for_like_query(core)
-                pattern = core_escaped
+                pattern = "%" + connection.ops.prep_for_like_query(core) + "%"
 
             cond: ClauseElement = or_(
                 column("content", Text).ilike(pattern),
@@ -816,6 +806,7 @@ class NarrowBuilder:
             query = query.where(maybe_negate(cond))
 
         return query
+
 
 
 

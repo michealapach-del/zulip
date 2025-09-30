@@ -769,11 +769,11 @@ class NarrowBuilder:
                 )
                 query = query.where(maybe_negate(cond))
 
-        # old code: cond = column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery)
-        cond = or_(
-            column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery),
-            column("rendered_content", Text).ilike(f"%{operand}%")
-        )
+        cond = column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery)
+        # cond = or_(
+        #     column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery),
+        #     column("rendered_content", Text).ilike(f"%{operand}%")
+        # )
         return query.where(maybe_negate(cond))
 
 
@@ -1384,26 +1384,26 @@ def fetch_messages(
         rows = list(sa_conn.execute(query).fetchall())
     
         ## FIX HIGHT LIGHT
-        if is_search:
-            # Break the operand into words (similar to the quoted phrase handling above)
-            search_terms = []
-            for term in re.findall(r'"[^"]+"|\S+', narrow[0]["operand"] if narrow else ""):
-                if term.startswith('"') and term.endswith('"'):
-                    search_terms.append(term[1:-1])
-                else:
-                    search_terms.append(term)
+        # if is_search:
+        #     # Break the operand into words (similar to the quoted phrase handling above)
+        #     search_terms = []
+        #     for term in re.findall(r'"[^"]+"|\S+', narrow[0]["operand"] if narrow else ""):
+        #         if term.startswith('"') and term.endswith('"'):
+        #             search_terms.append(term[1:-1])
+        #         else:
+        #             search_terms.append(term)
 
-            # Apply highlighting for LIKE matches
-            new_rows = []
-            for row in rows:
-                row = list(row)
-                # Assuming schema: [message_id, topic, rendered_content, ...]
-                if len(row) > 1:
-                    row[1] = highlight_like(row[1], search_terms)  # topic
-                if len(row) > 2:
-                    row[2] = highlight_like(row[2], search_terms)  # content
-                new_rows.append(tuple(row))
-            rows = new_rows
+        #     # Apply highlighting for LIKE matches
+        #     new_rows = []
+        #     for row in rows:
+        #         row = list(row)
+        #         # Assuming schema: [message_id, topic, rendered_content, ...]
+        #         if len(row) > 1:
+        #             row[1] = highlight_like(row[1], search_terms)  # topic
+        #         if len(row) > 2:
+        #             row[2] = highlight_like(row[2], search_terms)  # content
+        #         new_rows.append(tuple(row))
+        #     rows = new_rows
 
     query_info = post_process_limited_query(
         rows=rows,

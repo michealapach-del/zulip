@@ -781,16 +781,12 @@ class NarrowBuilder:
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
         """
-        LIKE-mode. Interpret semicolons at token boundaries:
-        - ;foo  -> %foo
-        - foo;  -> foo%
-        - ;foo; -> %foo%
-        Tokens without semicolons default to %token% (contains).
-        We also add empty content_matches/topic_matches columns so the result
-        column layout matches the FTS case.
+        LIKE-mode. Semicolons act as wildcards:
+        ;foo   -> %foo
+        foo;   -> foo%
+        ;foo;  -> %foo%
+        lo;kkk -> lo%kkk   (inside words also works)
         """
-        # Keep the column layout (so calling code that expects these columns doesn't break).
-        # Use an SQL literal for an empty integer array.
         empty_array = literal_column("ARRAY[]::integer[]")
         query = query.add_columns(
             empty_array.label("content_matches"),
@@ -799,30 +795,19 @@ class NarrowBuilder:
 
         tokens = re.findall(r'"[^"]+"|\S+', operand)
         for token in tokens:
-            # quoted phrase -> treat as contains "%phrase%"
             if token[0] == '"' and token[-1] == '"':
+                # Quoted phrase -> always contains search
                 core = token[1:-1]
-                if core == "":
+                if not core:
                     continue
                 pattern = "%" + connection.ops.prep_for_like_query(core) + "%"
             else:
-                # semicolon rules
-                leading = token.startswith(";")
-                trailing = token.endswith(";")
-                core = token.strip(";")
-                # skip empty cores (e.g. token == ";")
-                if core == "":
+                # Replace every semicolon with SQL wildcard %
+                core = token.replace(";", "%")
+                if not core:
                     continue
                 core_escaped = connection.ops.prep_for_like_query(core)
-                if leading and trailing:
-                    pattern = f"%{core_escaped}%"
-                elif leading:
-                    pattern = f"%{core_escaped}"
-                elif trailing:
-                    pattern = f"{core_escaped}%"
-                else:
-                    # in LIKE-mode, non-semicolon tokens => default to contains
-                    pattern = f"%{core_escaped}%"
+                pattern = core_escaped
 
             cond: ClauseElement = or_(
                 column("content", Text).ilike(pattern),
@@ -831,6 +816,7 @@ class NarrowBuilder:
             query = query.where(maybe_negate(cond))
 
         return query
+
 
 
     def _by_search_tsearch(

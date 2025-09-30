@@ -780,21 +780,79 @@ class NarrowBuilder:
     def _like_search(
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
-        # This function is ready if you later want special ;keyword; handling.
-        # For now, just mimic what the old commented-out LIKE path was doing.
-        cond: ClauseElement = or_(
-            column("content", Text).ilike(f"%{operand}%"),
-            topic_column_sa().ilike(f"%{operand}%"),
+        """
+        LIKE-mode. Interpret semicolons at token boundaries:
+        - ;foo  -> %foo
+        - foo;  -> foo%
+        - ;foo; -> %foo%
+        Tokens without semicolons default to %token% (contains).
+        We also add empty content_matches/topic_matches columns so the result
+        column layout matches the FTS case.
+        """
+        # Keep the column layout (so calling code that expects these columns doesn't break).
+        # Use an SQL literal for an empty integer array.
+        empty_array = literal_column("ARRAY[]::integer[]")
+        query = query.add_columns(
+            empty_array.label("content_matches"),
+            empty_array.label("topic_matches"),
         )
-        return query.where(maybe_negate(cond))
+
+        tokens = re.findall(r'"[^"]+"|\S+', operand)
+        for token in tokens:
+            # quoted phrase -> treat as contains "%phrase%"
+            if token[0] == '"' and token[-1] == '"':
+                core = token[1:-1]
+                if core == "":
+                    continue
+                pattern = "%" + connection.ops.prep_for_like_query(core) + "%"
+            else:
+                # semicolon rules
+                leading = token.startswith(";")
+                trailing = token.endswith(";")
+                core = token.strip(";")
+                # skip empty cores (e.g. token == ";")
+                if core == "":
+                    continue
+                core_escaped = connection.ops.prep_for_like_query(core)
+                if leading and trailing:
+                    pattern = f"%{core_escaped}%"
+                elif leading:
+                    pattern = f"%{core_escaped}"
+                elif trailing:
+                    pattern = f"{core_escaped}%"
+                else:
+                    # in LIKE-mode, non-semicolon tokens => default to contains
+                    pattern = f"%{core_escaped}%"
+
+            cond: ClauseElement = or_(
+                column("content", Text).ilike(pattern),
+                topic_column_sa().ilike(pattern),
+            )
+            query = query.where(maybe_negate(cond))
+
+        return query
 
 
     def _by_search_tsearch(
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
-        # For now, always use FTS path (old behavior).
-        # Later, you can add dispatching here:
-        if operand.startswith(";") or operand.endswith(";") or ";" in operand:
+        """
+        Dispatch: if operand matches the special semicolon format, use LIKE-mode.
+        Otherwise, fall back to FTS.
+        """
+
+        # Regex: semicolon-prefixed/suffixed tokens, possibly quoted.
+        # Examples matched:
+        #   ;keyword
+        #   keyword;
+        #   ;keyword;
+        #   " ;multi word; "
+        semicolon_pattern = re.compile(r'(^;.+)|(.+;$)|(^;.+;$)')
+
+        tokens = re.findall(r'"[^"]+"|\S+', operand)
+        use_like = any(semicolon_pattern.match(t) for t in tokens)
+
+        if use_like:
             return self._like_search(query, operand, maybe_negate)
         else:
             return self._fts_search(query, operand, maybe_negate)

@@ -787,17 +787,21 @@ class NarrowBuilder:
         tokens = re.findall(r'"[^"]+"|\S+', operand)
         for token in tokens:
             if token[0] == '"' and token[-1] == '"':
-                # Quoted phrase -> always contains search
                 core = token[1:-1]
                 if not core:
                     continue
-                pattern = "%" + connection.ops.prep_for_like_query(core) + "%"
+                pattern = f"%{core}%"  # quoted phrase, match anywhere
             else:
-                # Replace semicolons with %
-                core = token.replace(";", "%")
+                core = token
                 if not core:
                     continue
-                pattern = "%" + connection.ops.prep_for_like_query(core) + "%"
+                # Replace semicolons with % wildcards
+                pattern = core.replace(";", "%")
+                # If pattern does not start/end with %, wrap it to match anywhere
+                if not pattern.startswith("%"):
+                    pattern = "%" + pattern
+                if not pattern.endswith("%"):
+                    pattern = pattern + "%"
 
             cond: ClauseElement = or_(
                 column("content", Text).ilike(pattern),
@@ -806,9 +810,6 @@ class NarrowBuilder:
             query = query.where(maybe_negate(cond))
 
         return query
-
-
-
 
     def _by_search_tsearch(
         self, query: Select, operand: str, maybe_negate: ConditionTransform

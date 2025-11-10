@@ -795,13 +795,11 @@ class NarrowBuilder:
                 core = token
                 if not core:
                     continue
-                # Replace semicolons with % wildcards
-                pattern = core.replace(";", "%")
-                # If pattern does not start/end with %, wrap it to match anywhere
-                if not pattern.startswith("%"):
-                    pattern = "%" + pattern
-                if not pattern.endswith("%"):
-                    pattern = pattern + "%"
+                # Replace * with % wildcards
+                pattern = core.replace("*", "%")
+                # If no % in pattern, wrap to match anywhere
+                if "%" not in pattern:
+                    pattern = f"%{pattern}%"
 
             cond: ClauseElement = or_(
                 column("content", Text).ilike(pattern),
@@ -811,24 +809,19 @@ class NarrowBuilder:
 
         return query
 
+
     def _by_search_tsearch(
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
         """
-        Dispatch: if operand matches the special semicolon format, use LIKE-mode.
+        Dispatch: if operand contains * wildcards, use LIKE-mode.
         Otherwise, fall back to FTS.
         """
 
-        # Regex: semicolon-prefixed/suffixed tokens, possibly quoted.
-        # Examples matched:
-        #   ;keyword
-        #   keyword;
-        #   ;keyword;
-        #   " ;multi word; "
-        semicolon_pattern = re.compile(r'(^;.+)|(.+;$)|(^;.+;$)')
-
+        # Detect * anywhere (not only prefix/suffix)
+        wildcard_pattern = re.compile(r"\*")
         tokens = re.findall(r'"[^"]+"|\S+', operand)
-        use_like = any(semicolon_pattern.match(t) for t in tokens)
+        use_like = any(wildcard_pattern.search(t) for t in tokens)
 
         if use_like:
             return self._like_search(query, operand, maybe_negate)

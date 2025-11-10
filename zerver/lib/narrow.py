@@ -784,29 +784,27 @@ class NarrowBuilder:
             empty_array.label("topic_matches"),
         )
 
-        tokens = re.findall(r'"[^"]+"|\S+', operand)
-        for token in tokens:
-            if token[0] == '"' and token[-1] == '"':
-                core = token[1:-1]
-                if not core:
-                    continue
-                pattern = f"%{core}%"  # quoted phrase, match anywhere
-            else:
-                core = token
-                if not core:
-                    continue
-                # Replace * with % wildcards
-                pattern = core.replace("*", "%")
-                # If no % in pattern, wrap to match anywhere
-                if "%" not in pattern:
-                    pattern = f"%{pattern}%"
+        # Treat the entire operand as one search string
+        core = operand.strip()
 
-            cond: ClauseElement = or_(
-                column("content", Text).ilike(pattern),
-                topic_column_sa().ilike(pattern),
-            )
-            query = query.where(maybe_negate(cond))
+        # Remove surrounding quotes if present
+        if len(core) >= 2 and core[0] == '"' and core[-1] == '"':
+            core = core[1:-1]
 
+        # Replace * with % for SQL LIKE wildcard
+        pattern = core.replace("*", "%")
+
+        # If no wildcard given, match anywhere
+        if "%" not in pattern:
+            pattern = f"%{pattern}%"
+
+        # Create condition: match entire message or topic
+        cond: ClauseElement = or_(
+            column("content", Text).ilike(pattern),
+            topic_column_sa().ilike(pattern),
+        )
+
+        query = query.where(maybe_negate(cond))
         return query
 
 

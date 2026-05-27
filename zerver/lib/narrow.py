@@ -253,6 +253,46 @@ def ts_locs_array(
     )
 
 
+# Characters with special meaning in PostgreSQL POSIX regular expressions.
+_POSIX_REGEX_SPECIAL = set(r".\^$|?*+()[]{}")
+
+
+def _escape_for_posix_regex(token: str) -> str:
+    return "".join("\\" + c if c in _POSIX_REGEX_SPECIAL else c for c in token)
+
+
+def like_locs_array(
+    text: ColumnElement[Text],
+    tokens: list[str],
+) -> ColumnElement[ARRAY[Integer]]:
+    # Wildcard (`*`) LIKE-mode search has no PostgreSQL function that
+    # directly returns (offset, length) match arrays. We reuse the
+    # same trick as `ts_locs_array`: wrap each match in TS_START /
+    # TS_STOP delimiters using a case-insensitive POSIX regex, then
+    # compute positions in the original text by string-splitting on
+    # TS_START. With no tokens to highlight, return an empty array.
+    if not tokens:
+        return literal_column("ARRAY[]::integer[]")
+    pattern = "(" + "|".join(_escape_for_posix_regex(t) for t in tokens) + ")"
+    delimited = func.regexp_replace(
+        text,
+        literal(pattern),
+        literal(TS_START + r"\&" + TS_STOP),
+        literal("gi"),
+        type_=Text,
+    )
+    part = func.unnest(
+        func.string_to_array(delimited, TS_START, type_=ARRAY(Text)), type_=Text
+    ).column_valued()
+    part_len = func.length(part, type_=Integer) - len(TS_STOP)
+    match_pos = func.sum(part_len, type_=Integer).over(rows=(None, -1)) + len(TS_STOP)
+    match_len = func.strpos(part, TS_STOP, type_=Integer) - 1
+    return func.array(
+        select(postgresql.array([match_pos, match_len])).offset(1).scalar_subquery(),
+        type_=ARRAY(Integer),
+    )
+
+
 class NarrowBuilder:
     """
     Build up a SQLAlchemy query to find messages matching a narrow.
@@ -723,6 +763,19 @@ class NarrowBuilder:
     def _by_search_tsearch(
         self, query: Select, operand: str, maybe_negate: ConditionTransform
     ) -> Select:
+        # If the operand contains a `*` wildcard anywhere, switch to
+        # ILIKE-mode substring search. This lets users search for
+        # exact substrings (including punctuation and short tokens
+        # that PostgreSQL's full-text search would otherwise ignore
+        # via stemming and stop-word handling) by typing e.g.
+        # `*key word*`.
+        if "*" in operand:
+            return self._by_search_ilike(query, operand, maybe_negate)
+        return self._by_search_fts(query, operand, maybe_negate)
+
+    def _by_search_fts(
+        self, query: Select, operand: str, maybe_negate: ConditionTransform
+    ) -> Select:
         tsquery = func.plainto_tsquery(literal("zulip.english_us_search"), literal(operand))
         query = query.add_columns(
             ts_locs_array(
@@ -754,6 +807,42 @@ class NarrowBuilder:
                 query = query.where(maybe_negate(cond))
 
         cond = column("search_tsvector", postgresql.TSVECTOR).op("@@")(tsquery)
+        return query.where(maybe_negate(cond))
+
+    def _by_search_ilike(
+        self, query: Select, operand: str, maybe_negate: ConditionTransform
+    ) -> Select:
+        # Treat the whole operand as a single LIKE pattern, mapping
+        # user-typed `*` to SQL `%`. Surrounding quotes (if any) are
+        # stripped first so `"*foo bar*"` behaves like `*foo bar*`.
+        raw = operand.strip()
+        if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+            raw = raw[1:-1]
+        like_pattern = raw.replace("*", "%")
+        if "%" not in like_pattern:
+            like_pattern = "%" + like_pattern + "%"
+
+        # For highlighting, treat each whitespace/`*`-separated piece
+        # as an independent token to mark up in the rendered content
+        # and topic. This produces visually useful highlights even
+        # for multi-wildcard patterns like `*foo*bar*`.
+        tokens = [t for t in re.split(r"[*\s]+", raw) if t]
+
+        query = query.add_columns(
+            like_locs_array(column("rendered_content", Text), tokens).label("content_matches"),
+            # We HTML-escape the topic in PostgreSQL to avoid doing a server round-trip
+            like_locs_array(
+                func.escape_html(topic_column_sa(), type_=Text), tokens
+            ).label("topic_matches"),
+        )
+
+        cond: ClauseElement = or_(
+            column("content", Text).ilike(like_pattern),
+            and_(
+                topic_column_sa().ilike(like_pattern),
+                column("is_channel_message", Boolean),
+            ),
+        )
         return query.where(maybe_negate(cond))
 
 
